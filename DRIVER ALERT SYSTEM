@@ -1,0 +1,370 @@
+
+/*
+
+
+  BOARD: Arduino Nano (ATmega328P)
+
+  COMPONENT CONNECTIONS:
+    Green LED  : D6 -> 220 ohm resistor -> LED (+)
+                 LED (-) -> GND
+
+    Red LED    : D7 -> 220 ohm resistor -> LED (+)
+                 LED (-) -> GND
+
+    Buzzer     : D8 -> Buzzer (+)
+                 Buzzer (-) -> GND
+
+    MQ-3       : AO -> A0
+                 VCC -> 5V (check module rating)
+                 GND -> GND
+
+  SERIAL MONITOR:
+    Baud rate: 115200
+    Line ending: Newline
+
+  COMMANDS:
+    S:OK
+    S:IDLE
+    S:DROWSY
+    S:SMOKING
+    S:DRUNK
+
+  ALERT BEHAVIOUR:
+    OK       : Green ON, buzzer OFF
+    IDLE     : Green slow blink
+    DROWSY   : Red ON, fast beeping
+    SMOKING  : Red blinking, two short beeps
+    DRUNK    : Red fast blinking, long beeps
+    NO LINK  : Red and green alternate
+
+  NOTE:
+    USB Serial only. Arduino Nano has no built-in Wi-Fi.
+*/
+
+// =====================================================
+// PIN CONFIGURATION
+// =====================================================
+
+const byte PIN_GREEN  = 6;
+const byte PIN_RED    = 7;
+const byte PIN_BUZZER = 8;
+
+#define USE_MQ3 0
+
+const byte PIN_MQ3 = A0;
+
+// MQ-3 threshold (ADC range 0-1023).
+// Calibrate for your particular sensor.
+const int MQ3_THRESHOLD = 500;
+
+// Communication timeout
+const unsigned long LINK_TIMEOUT_MS = 5000;
+
+// MQ-3 sampling interval
+const unsigned long MQ3_INTERVAL_MS = 500;
+
+// =====================================================
+// DRIVER STATES
+// =====================================================
+
+enum State {
+  ST_IDLE,
+  ST_OK,
+  ST_DROWSY,
+  ST_SMOKING,
+  ST_DRUNK,
+  ST_NOLINK
+};
+
+State state = ST_NOLINK;
+
+// =====================================================
+// GLOBAL VARIABLES
+// =====================================================
+
+unsigned long lastMsgMs = 0;
+unsigned long lastMqMs = 0;
+
+bool sensorAlcohol = false;
+int mq3Value = 0;
+int mq3Hits = 0;
+
+String serialBuf = "";
+
+// =====================================================
+// PARSE DRIVER STATE
+// =====================================================
+
+State parseState(String s) {
+  s.trim();
+  s.toUpperCase();
+
+  if (s == "OK") {
+    return ST_OK;
+  }
+
+  if (s == "IDLE") {
+    return ST_IDLE;
+  }
+
+  if (s == "DROWSY") {
+    return ST_DROWSY;
+  }
+
+  if (s == "SMOKING") {
+    return ST_SMOKING;
+  }
+
+  if (s == "DRUNK") {
+    return ST_DRUNK;
+  }
+
+  return ST_NOLINK;
+}
+
+// =====================================================
+// UPDATE DRIVER STATE
+// =====================================================
+
+void setState(String s) {
+  State newState = parseState(s);
+
+  // Ignore unknown commands
+  if (newState == ST_NOLINK) {
+    Serial.println(F("ERROR: Unknown driver state"));
+    return;
+  }
+
+  state = newState;
+  lastMsgMs = millis();
+
+  Serial.print(F("Driver state updated: "));
+  Serial.println(s);
+}
+
+// =====================================================
+// CONTROL OUTPUTS
+// =====================================================
+
+void drive(bool green, bool red, bool buzzer) {
+  digitalWrite(PIN_GREEN, green ? HIGH : LOW);
+  digitalWrite(PIN_RED, red ? HIGH : LOW);
+  digitalWrite(PIN_BUZZER, buzzer ? HIGH : LOW);
+}
+
+// =====================================================
+// UPDATE LED AND BUZZER PATTERNS
+// =====================================================
+
+void updateOutputs() {
+  unsigned long ms = millis();
+
+  State effectiveState = state;
+
+  // Check communication timeout
+  if (ms - lastMsgMs > LINK_TIMEOUT_MS) {
+    effectiveState = ST_NOLINK;
+  }
+
+  // Optional MQ-3 alert
+  // Alcohol sensor may override OK or IDLE states.
+  if (sensorAlcohol &&
+      (effectiveState == ST_OK ||
+       effectiveState == ST_IDLE)) {
+    effectiveState = ST_DRUNK;
+  }
+
+  switch (effectiveState) {
+
+    // -----------------------------------------------
+    // DRIVER NORMAL
+    // -----------------------------------------------
+    case ST_OK:
+      drive(true, false, false);
+      break;
+
+    // -----------------------------------------------
+    // CAMERA IDLE
+    // -----------------------------------------------
+    case ST_IDLE:
+      drive((ms % 2000UL) < 1000UL,
+            false,
+            false);
+      break;
+
+    // -----------------------------------------------
+    // DROWSINESS ALERT
+    // -----------------------------------------------
+    case ST_DROWSY:
+      drive(false,
+            true,
+            (ms % 300UL) < 150UL);
+      break;
+
+    // -----------------------------------------------
+    // SMOKING ALERT
+    // -----------------------------------------------
+    case ST_SMOKING: {
+      unsigned long t = ms % 1500UL;
+
+      bool redBlink = (ms % 600UL) < 300UL;
+
+      bool doubleBeep =
+        (t < 150UL) ||
+        (t >= 300UL && t < 450UL);
+
+      drive(false, redBlink, doubleBeep);
+      break;
+    }
+
+    // -----------------------------------------------
+    // DRUNK ALERT
+    // -----------------------------------------------
+    case ST_DRUNK:
+      drive(false,
+            (ms % 300UL) < 150UL,
+            (ms % 900UL) < 600UL);
+      break;
+
+    // -----------------------------------------------
+    // COMMUNICATION LOST
+    // -----------------------------------------------
+    case ST_NOLINK:
+      drive((ms % 1000UL) < 500UL,
+            (ms % 1000UL) >= 500UL,
+            false);
+      break;
+  }
+}
+
+// =====================================================
+// READ USB SERIAL COMMANDS
+// =====================================================
+
+void readSerialCommands() {
+  while (Serial.available() > 0) {
+    char c = Serial.read();
+
+    if (c == '\n' || c == '\r') {
+      serialBuf.trim();
+
+      if (serialBuf.startsWith("S:")) {
+        String receivedState = serialBuf.substring(2);
+        setState(receivedState);
+      } else if (serialBuf.length() > 0) {
+        Serial.print(F("Invalid command: "));
+        Serial.println(serialBuf);
+      }
+
+      serialBuf = "";
+    } else {
+      if (serialBuf.length() < 32) {
+        serialBuf += c;
+      }
+    }
+  }
+}
+
+// =====================================================
+// OPTIONAL MQ-3 ALCOHOL SENSOR
+// =====================================================
+
+void readMQ3Sensor() {
+#if USE_MQ3
+
+  unsigned long ms = millis();
+
+  if (ms - lastMqMs >= MQ3_INTERVAL_MS) {
+    lastMqMs = ms;
+
+    mq3Value = analogRead(PIN_MQ3);
+
+    Serial.print(F("MQ3:"));
+    Serial.println(mq3Value);
+
+    if (mq3Value >= MQ3_THRESHOLD) {
+      if (mq3Hits < 5) {
+        mq3Hits++;
+      }
+    } else {
+      mq3Hits = 0;
+    }
+
+    // Trigger after three consecutive high readings
+    sensorAlcohol = (mq3Hits >= 3);
+  }
+
+#endif
+}
+
+// =====================================================
+// STARTUP
+// =====================================================
+
+void setup() {
+  // Configure output pins
+  pinMode(PIN_GREEN, OUTPUT);
+  pinMode(PIN_RED, OUTPUT);
+  pinMode(PIN_BUZZER, OUTPUT);
+
+#if USE_MQ3
+  pinMode(PIN_MQ3, INPUT);
+#endif
+
+  // Turn off outputs
+  drive(false, false, false);
+
+  // Start serial communication
+  Serial.begin(115200);
+
+  delay(300);
+
+  // Power-on self-test: green LED
+  drive(true, false, false);
+  delay(250);
+
+  // Power-on self-test: red LED and buzzer
+  drive(false, true, true);
+  delay(250);
+
+  // Turn everything off
+  drive(false, false, false);
+
+  // Start watchdog timer
+  lastMsgMs = millis();
+
+  // Startup information
+  Serial.println();
+  Serial.println(F("================================"));
+  Serial.println(F(" ARDUINO NANO DRIVER ALERT"));
+  Serial.println(F("================================"));
+  Serial.println(F("Serial baud rate: 115200"));
+  Serial.println(F("Send one command per line:"));
+  Serial.println(F("S:OK"));
+  Serial.println(F("S:IDLE"));
+  Serial.println(F("S:DROWSY"));
+  Serial.println(F("S:SMOKING"));
+  Serial.println(F("S:DRUNK"));
+  Serial.println(F("================================"));
+
+#if USE_MQ3
+  Serial.println(F("MQ-3 sensor enabled"));
+#else
+  Serial.println(F("MQ-3 sensor disabled"));
+#endif
+}
+
+// =====================================================
+// MAIN LOOP
+// =====================================================
+
+void loop() {
+  // Read state from computer or connected controller
+  readSerialCommands();
+
+  // Read optional alcohol sensor
+  readMQ3Sensor();
+
+  // Update LEDs and buzzer
+  updateOutputs();
+}
