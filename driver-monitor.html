@@ -1,0 +1,459 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Driver Safety Monitor</title>
+<style>
+  :root { --bg:#0f1218; --card:#181d27; --text:#e8ecf3; --muted:#8b95a7; --ok:#2ecc71; --warn:#f5a623; --bad:#ff4d4f; --accent:#4c8dff; }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif; background:var(--bg); color:var(--text); }
+  header { padding:16px 20px; border-bottom:1px solid #232a38; }
+  header h1 { margin:0; font-size:20px; }
+  header p { margin:4px 0 0; color:var(--muted); font-size:13px; }
+  main { display:grid; grid-template-columns:minmax(0,2fr) minmax(300px,1fr); gap:16px; padding:16px; max-width:1200px; margin:0 auto; }
+  @media (max-width:850px){ main{ grid-template-columns:1fr; } }
+  .card { background:var(--card); border-radius:14px; padding:14px; margin-bottom:16px; }
+  .card h3 { margin:0 0 8px; font-size:14px; color:var(--muted); font-weight:600; text-transform:uppercase; letter-spacing:.5px; }
+  .stage { position:relative; width:100%; aspect-ratio:4/3; background:#000; border-radius:10px; overflow:hidden; border:4px solid var(--ok); transition:border-color .2s; }
+  .stage.warn { border-color:var(--warn); }
+  .stage.bad { border-color:var(--bad); animation:pulse .6s infinite alternate; }
+  @keyframes pulse { from{ box-shadow:0 0 0 0 rgba(255,77,79,0);} to{ box-shadow:0 0 30px 6px rgba(255,77,79,.7);} }
+  video, canvas { position:absolute; inset:0; width:100%; height:100%; object-fit:cover; transform:scaleX(-1); }
+  .banner { position:absolute; left:0; right:0; top:0; padding:10px; text-align:center; font-weight:700; letter-spacing:.5px; background:rgba(255,77,79,.92); display:none; }
+  .stage.bad .banner { display:block; }
+  .status { font-size:26px; font-weight:700; margin:0 0 4px; }
+  .status.ok { color:var(--ok); } .status.warn { color:var(--warn); } .status.bad { color:var(--bad); }
+  .sub { color:var(--muted); font-size:13px; margin:0 0 10px; min-height:18px; }
+  .chips { display:flex; gap:6px; flex-wrap:wrap; margin:0 0 10px; }
+  .chip { font-size:12px; padding:4px 10px; border-radius:20px; background:#232a38; color:var(--muted); }
+  .chip.on { background:var(--bad); color:#fff; font-weight:700; }
+  .row { display:flex; justify-content:space-between; padding:7px 0; border-bottom:1px solid #232a38; font-size:14px; }
+  .row span:first-child { color:var(--muted); }
+  .meter { height:8px; background:#232a38; border-radius:6px; overflow:hidden; margin:6px 0 10px; }
+  .meter > div { height:100%; width:0; background:var(--accent); transition:width .1s; }
+  label { display:block; font-size:13px; color:var(--muted); margin:10px 0 4px; }
+  input[type=range] { width:100%; }
+  input[type=text] { width:100%; padding:8px 10px; border-radius:8px; border:1px solid #2a3243; background:#0f1218; color:var(--text); font-size:14px; }
+  button { background:var(--accent); color:#fff; border:0; padding:9px 14px; border-radius:8px; font-size:13px; cursor:pointer; margin:6px 6px 0 0; }
+  button.secondary { background:#2a3243; }
+  button:disabled { opacity:.5; cursor:default; }
+  .dot { display:inline-block; width:10px; height:10px; border-radius:50%; background:#555; margin-right:6px; }
+  .dot.on { background:var(--ok); }
+  #msg { color:var(--muted); font-size:13px; margin-top:10px; min-height:18px; }
+  .note { font-size:12px; color:var(--muted); line-height:1.5; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Driver Safety Monitor</h1>
+  <p>Drowsiness · smoking · possible impairment — with ESP32 LED + buzzer output. Video is processed in your browser only.</p>
+</header>
+
+<main>
+  <div>
+    <section class="card">
+      <div class="stage" id="stage">
+        <video id="video" playsinline muted></video>
+        <canvas id="canvas"></canvas>
+        <div class="banner" id="banner">ALERT</div>
+      </div>
+      <div>
+        <button id="startBtn">Start camera</button>
+        <button id="stopBtn" class="secondary" disabled>Stop</button>
+        <button id="muteBtn" class="secondary">Sound: on</button>
+        <button id="calBtn" class="secondary">Calibrate (eyes open)</button>
+      </div>
+      <div id="msg">Click “Start camera” and allow access.</div>
+    </section>
+
+    <section class="card">
+      <h3>ESP32 hardware</h3>
+      <div class="row"><span><span class="dot" id="espDot"></span>Link</span><b id="espStatus">Not connected</b></div>
+      <div class="row"><span>Last sent</span><b id="espLast">–</b></div>
+      <div class="row"><span>Alcohol sensor (MQ-3)</span><b id="mq3Val">–</b></div>
+      <div>
+        <button id="serialBtn">Connect USB (Serial)</button>
+        <button id="serialOff" class="secondary" disabled>Disconnect</button>
+      </div>
+      <label>…or WiFi: ESP32 IP address (printed in Serial Monitor)</label>
+      <input type="text" id="espIp" placeholder="e.g. 192.168.1.50">
+      <button id="wifiBtn" class="secondary">Use WiFi</button>
+      <label>Test the hardware</label>
+      <div>
+        <button class="secondary" data-test="OK">OK</button>
+        <button class="secondary" data-test="DROWSY">Drowsy</button>
+        <button class="secondary" data-test="SMOKING">Smoking</button>
+        <button class="secondary" data-test="DRUNK">Drunk</button>
+      </div>
+      <p class="note">USB mode needs Chrome or Edge. WiFi mode needs this page opened over <code>http://localhost</code> (not https), on the same network as the ESP32.</p>
+    </section>
+  </div>
+
+  <aside>
+    <section class="card">
+      <p class="status ok" id="status">Idle</p>
+      <p class="sub" id="substatus">Camera off</p>
+      <div class="chips">
+        <span class="chip" id="chipDrowsy">Drowsy</span>
+        <span class="chip" id="chipSmoke">Smoking</span>
+        <span class="chip" id="chipDrunk">Impaired</span>
+      </div>
+
+      <div class="row"><span>Eye aspect ratio (EAR)</span><b id="earVal">–</b></div>
+      <div class="row"><span>Mouth aspect ratio (MAR)</span><b id="marVal">–</b></div>
+      <div class="row"><span>Eyes closed for</span><b id="closedVal">0.0 s</b></div>
+      <div class="row"><span>Hand at mouth for</span><b id="handVal">0.0 s</b></div>
+      <div class="row"><span>Head sway / impairment score</span><b id="impVal">–</b></div>
+      <div class="row"><span>Blinks / Yawns</span><b id="blinkVal">0 / 0</b></div>
+      <div class="row"><span>Alerts (drowsy / smoke / impaired)</span><b id="alertVal">0 / 0 / 0</b></div>
+
+      <label>Drowsiness level</label>
+      <div class="meter"><div id="levelBar"></div></div>
+
+      <label>EAR threshold: <b id="earThVal">0.21</b></label>
+      <input type="range" id="earTh" min="0.10" max="0.35" step="0.01" value="0.21">
+      <label>Alert after eyes closed: <b id="timeThVal">1.5</b> s</label>
+      <input type="range" id="timeTh" min="0.5" max="4" step="0.1" value="1.5">
+      <label>Yawn MAR threshold: <b id="marThVal">0.60</b></label>
+      <input type="range" id="marTh" min="0.3" max="1.0" step="0.05" value="0.60">
+      <label>Smoking: hand-to-mouth hold time: <b id="smokeTimeVal">2.0</b> s</label>
+      <input type="range" id="smokeTime" min="1" max="6" step="0.5" value="2">
+      <label>Impairment score threshold: <b id="impThVal">60</b></label>
+      <input type="range" id="impTh" min="30" max="95" step="5" value="60">
+      <label>MQ-3 alcohol alert level (raw ADC): <b id="mqThVal">2000</b></label>
+      <input type="range" id="mqTh" min="500" max="4000" step="100" value="2000">
+    </section>
+
+    <section class="card">
+      <h3>How detection works</h3>
+      <p class="note">
+        <b>Drowsy:</b> eyes closed longer than the set time.<br>
+        <b>Smoking:</b> index/middle fingertips held at the mouth. This is a gesture heuristic, so eating or drinking can trigger it too. A camera cannot see a cigarette reliably.<br>
+        <b>Impaired / “drunk”:</b> camera cannot measure alcohol. It flags unusual head swaying, tilt and heavy-lidded eyes as <i>possible</i> impairment. For real alcohol detection, fit the MQ-3 sensor to the ESP32 (see sketch).
+      </p>
+    </section>
+  </aside>
+</main>
+
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/face_mesh.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+<script>
+const $ = id => document.getElementById(id);
+const video = $('video'), canvas = $('canvas'), ctx = canvas.getContext('2d');
+const stage = $('stage'), statusEl = $('status');
+
+// ---------- Landmarks ----------
+const LEFT_EYE  = [362, 385, 387, 263, 373, 380];
+const RIGHT_EYE = [33, 160, 158, 133, 153, 144];
+const MOUTH = { top:13, bottom:14, left:78, right:308 };
+const FINGER_TIPS = [8, 12]; // index, middle
+
+// ---------- Settings ----------
+let earTh = 0.21, timeTh = 1.5, marTh = 0.60, smokeTime = 2, impTh = 60, mqTh = 2000;
+let muted = false, camera = null, running = false, calibrating = false, calSamples = [];
+
+// ---------- State ----------
+let closedSince = null, wasClosed = false, wasYawning = false, yawnStart = null;
+let blinks = 0, yawns = 0;
+let nearSince = null, nearLostAt = null, smokeActive = false;
+let impSince = null, impActive = false;
+const counts = { DROWSY:0, SMOKING:0, DRUNK:0 };
+let active = { DROWSY:false, SMOKING:false, DRUNK:false };
+let lastHands = [];
+let history = []; // {t, roll, x, y, half}
+let mq3 = null;
+let currentState = 'IDLE';
+
+// ---------- Audio ----------
+let audioCtx = null, alarmTimer = null, alarmType = null;
+function tone(freq, dur, type = 'square', vol = 0.18, delay = 0) {
+  if (muted) return;
+  audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+  const t0 = audioCtx.currentTime + delay;
+  const o = audioCtx.createOscillator(), g = audioCtx.createGain();
+  o.type = type; o.frequency.value = freq;
+  g.gain.setValueAtTime(vol, t0);
+  g.gain.exponentialRampToValueAtTime(0.001, t0 + dur);
+  o.connect(g); g.connect(audioCtx.destination);
+  o.start(t0); o.stop(t0 + dur);
+}
+const PATTERNS = {
+  // fast, harsh beeps
+  DROWSY:  { every: 500,  play: () => { tone(980, 0.25, 'square'); } },
+  // two short mid tones
+  SMOKING: { every: 1400, play: () => { tone(520, 0.15, 'triangle', .25); tone(520, 0.15, 'triangle', .25, 0.25); } },
+  // two-tone siren
+  DRUNK:   { every: 1000, play: () => { tone(440, 0.4, 'sawtooth', .15); tone(740, 0.4, 'sawtooth', .15, 0.45); } },
+};
+const SPEECH = { DROWSY:'Drowsiness detected. Wake up.', SMOKING:'Smoking detected. Please do not smoke while driving.', DRUNK:'Possible impairment detected. Please pull over.' };
+function speak(text) {
+  if (muted || !('speechSynthesis' in window)) return;
+  try { speechSynthesis.cancel(); speechSynthesis.speak(new SpeechSynthesisUtterance(text)); } catch(e){}
+}
+function setAlarm(type) { // type = DROWSY|SMOKING|DRUNK|null
+  if (type === alarmType) return;
+  clearInterval(alarmTimer); alarmTimer = null; alarmType = type;
+  if (!type) return;
+  PATTERNS[type].play();
+  alarmTimer = setInterval(() => PATTERNS[type].play(), PATTERNS[type].every);
+  speak(SPEECH[type]);
+}
+
+// ---------- Geometry ----------
+const dist = (a, b, w = 1, h = 1) => Math.hypot((a.x - b.x) * w, (a.y - b.y) * h);
+function ear(lm, idx) {
+  const [p1,p2,p3,p4,p5,p6] = idx.map(i => lm[i]);
+  return (dist(p2,p6) + dist(p3,p5)) / (2 * dist(p1,p4));
+}
+const mar = lm => dist(lm[MOUTH.top], lm[MOUTH.bottom]) / dist(lm[MOUTH.left], lm[MOUTH.right]);
+
+// ---------- UI helpers ----------
+function bindSlider(id, valId, cb, fmt = v => v) {
+  $(id).addEventListener('input', e => { const v = parseFloat(e.target.value); $(valId).textContent = fmt(v); cb(v); });
+}
+bindSlider('earTh','earThVal', v => earTh=v, v => v.toFixed(2));
+bindSlider('timeTh','timeThVal', v => timeTh=v, v => v.toFixed(1));
+bindSlider('marTh','marThVal', v => marTh=v, v => v.toFixed(2));
+bindSlider('smokeTime','smokeTimeVal', v => smokeTime=v, v => v.toFixed(1));
+bindSlider('impTh','impThVal', v => impTh=v);
+bindSlider('mqTh','mqThVal', v => mqTh=v);
+
+$('muteBtn').onclick = () => { muted = !muted; $('muteBtn').textContent = 'Sound: ' + (muted ? 'off' : 'on'); if (muted) { clearInterval(alarmTimer); alarmTimer=null; alarmType=null; try{speechSynthesis.cancel();}catch(e){} } };
+$('calBtn').onclick = () => {
+  if (!running) { $('msg').textContent = 'Start the camera first.'; return; }
+  calibrating = true; calSamples = [];
+  $('msg').textContent = 'Calibrating: look at the camera with eyes naturally open for 3 seconds…';
+  setTimeout(() => {
+    calibrating = false;
+    if (calSamples.length > 10) {
+      const avg = calSamples.reduce((a,b)=>a+b,0) / calSamples.length;
+      earTh = Math.max(0.10, Math.min(0.35, avg * 0.75));
+      $('earTh').value = earTh; $('earThVal').textContent = earTh.toFixed(2);
+      $('msg').textContent = `Calibrated. Open-eye EAR ≈ ${avg.toFixed(2)}, threshold set to ${earTh.toFixed(2)}.`;
+    } else $('msg').textContent = 'Calibration failed: no face detected.';
+  }, 3000);
+};
+
+function setChip(id, on) { $(id).classList.toggle('on', on); }
+
+// ---------- ESP32 link (Web Serial + WiFi) ----------
+let serialPort = null, serialWriter = null, serialReading = false, wifiIP = '';
+const enc = new TextEncoder();
+function espUI() {
+  const ok = !!serialWriter || !!wifiIP;
+  $('espDot').classList.toggle('on', ok);
+  $('espStatus').textContent = serialWriter ? 'USB connected' : wifiIP ? 'WiFi: ' + wifiIP : 'Not connected';
+  $('serialOff').disabled = !serialWriter;
+  $('serialBtn').disabled = !!serialWriter;
+}
+async function sendESP(state) {
+  $('espLast').textContent = state;
+  if (serialWriter) { try { await serialWriter.write(enc.encode(`S:${state}\n`)); } catch(e){ $('msg').textContent = 'USB write failed: ' + e.message; } }
+  if (wifiIP) { fetch(`http://${wifiIP}/state?s=${state}`, { mode:'no-cors' }).catch(()=>{}); }
+}
+$('serialBtn').onclick = async () => {
+  if (!('serial' in navigator)) { $('msg').textContent = 'Web Serial is not supported here. Use Chrome/Edge, or WiFi mode.'; return; }
+  try {
+    serialPort = await navigator.serial.requestPort();
+    await serialPort.open({ baudRate: 115200 });
+    serialWriter = serialPort.writable.getWriter();
+    espUI(); sendESP(currentState); readSerial();
+    $('msg').textContent = 'ESP32 connected over USB.';
+  } catch (e) { $('msg').textContent = 'Serial connect failed: ' + e.message; }
+};
+async function readSerial() {
+  serialReading = true;
+  const dec = new TextDecoder(); let buf = '';
+  try {
+    const reader = serialPort.readable.getReader();
+    while (serialReading) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value);
+      let i;
+      while ((i = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, i).trim(); buf = buf.slice(i + 1);
+        const m = line.match(/^MQ3:(\d+)/);
+        if (m) { mq3 = parseInt(m[1], 10); $('mq3Val').textContent = mq3 + (mq3 >= mqTh ? ' (HIGH)' : ''); }
+      }
+    }
+    reader.releaseLock();
+  } catch (e) {}
+}
+$('serialOff').onclick = async () => {
+  serialReading = false;
+  try { await sendESP('IDLE'); if (serialWriter) serialWriter.releaseLock(); await serialPort.close(); } catch(e){}
+  serialWriter = null; serialPort = null; espUI();
+};
+$('wifiBtn').onclick = () => {
+  wifiIP = $('espIp').value.trim();
+  espUI();
+  if (wifiIP) { sendESP(currentState); $('msg').textContent = 'WiFi target set to ' + wifiIP; }
+};
+document.querySelectorAll('[data-test]').forEach(b => b.onclick = () => sendESP(b.dataset.test));
+// heartbeat so the ESP32 knows the link is alive
+setInterval(() => { if (serialWriter || wifiIP) sendESP(currentState); }, 1000);
+
+// ---------- Face Mesh + Hands ----------
+const faceMesh = new FaceMesh({ locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${f}` });
+faceMesh.setOptions({ maxNumFaces: 1, refineLandmarks: true, minDetectionConfidence: .5, minTrackingConfidence: .5 });
+faceMesh.onResults(onFace);
+const hands = new Hands({ locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}` });
+hands.setOptions({ maxNumHands: 2, modelComplexity: 0, minDetectionConfidence: .5, minTrackingConfidence: .5 });
+hands.onResults(r => { lastHands = r.multiHandLandmarks || []; });
+
+function drawPoints(pts, color, r = 2.5) {
+  ctx.fillStyle = color;
+  for (const p of pts) { ctx.beginPath(); ctx.arc(p.x * canvas.width, p.y * canvas.height, r, 0, 7); ctx.fill(); }
+}
+
+function onFace(res) {
+  if (!running) return;
+  const W = canvas.width = video.videoWidth || 640, H = canvas.height = video.videoHeight || 480;
+  ctx.clearRect(0, 0, W, H);
+
+  // draw hand fingertips
+  for (const h of lastHands) drawPoints(FINGER_TIPS.map(i => h[i]), '#c084fc', 5);
+
+  if (!res.multiFaceLandmarks || !res.multiFaceLandmarks.length) {
+    closedSince = null; wasClosed = false; nearSince = null; impSince = null; history = [];
+    active = { DROWSY:false, SMOKING:false, DRUNK:false };
+    refreshState('No face detected', 'Look at the camera');
+    $('levelBar').style.width = '0%';
+    return;
+  }
+  const lm = res.multiFaceLandmarks[0];
+  const now = performance.now();
+  const e = (ear(lm, LEFT_EYE) + ear(lm, RIGHT_EYE)) / 2;
+  const m = mar(lm);
+  $('earVal').textContent = e.toFixed(3);
+  $('marVal').textContent = m.toFixed(3);
+  if (calibrating) calSamples.push(e);
+
+  drawPoints(LEFT_EYE.concat(RIGHT_EYE).map(i => lm[i]), e < earTh ? '#ff4d4f' : '#2ecc71');
+  drawPoints(Object.values(MOUTH).map(i => lm[i]), m > marTh ? '#f5a623' : '#4c8dff');
+
+  // ===== 1. Drowsiness =====
+  const closed = e < earTh;
+  let closedDur = 0;
+  if (closed) { if (closedSince === null) closedSince = now; closedDur = (now - closedSince) / 1000; }
+  else {
+    if (wasClosed && closedSince !== null) { const d = (now - closedSince) / 1000; if (d > .05 && d < .6) blinks++; }
+    closedSince = null;
+  }
+  wasClosed = closed;
+  $('closedVal').textContent = closedDur.toFixed(1) + ' s';
+
+  const yawning = m > marTh;
+  let yawnHeld = false;
+  if (yawning) { if (yawnStart === null) yawnStart = now; if ((now - yawnStart) > 1000) { yawnHeld = true; if (!wasYawning) { yawns++; wasYawning = true; } } }
+  else { yawnStart = null; wasYawning = false; }
+  $('blinkVal').textContent = blinks + ' / ' + yawns;
+
+  let level = Math.min(100, (closedDur / timeTh) * 100);
+  if (yawnHeld) level = Math.max(level, 60);
+  $('levelBar').style.width = level + '%';
+  const drowsy = closedDur >= timeTh;
+
+  // ===== 2. Smoking (fingertips held at mouth) =====
+  const faceW = dist(lm[234], lm[454], W, H);
+  const mouthC = lm[13];
+  let minD = Infinity;
+  for (const h of lastHands) for (const i of FINGER_TIPS) minD = Math.min(minD, dist(h[i], mouthC, W, H) / faceW);
+  const near = minD < 0.32;
+  let nearDur = 0;
+  if (near) { nearLostAt = null; if (nearSince === null) nearSince = now; nearDur = (now - nearSince) / 1000; }
+  else {
+    if (nearLostAt === null) nearLostAt = now;
+    if (now - nearLostAt > 1000) { nearSince = null; }       // 1 s grace before resetting
+    else if (nearSince !== null) nearDur = (now - nearSince) / 1000;
+  }
+  $('handVal').textContent = nearDur.toFixed(1) + ' s';
+  const smoking = nearSince !== null && nearDur >= smokeTime;
+
+  // ===== 3. Possible impairment (head sway + heavy lids) =====
+  const rEye = lm[33], lEye = lm[263];
+  const roll = Math.atan2((lEye.y - rEye.y) * H, (lEye.x - rEye.x) * W) * 180 / Math.PI;
+  const nose = lm[1];
+  const half = (e >= earTh && e < earTh * 1.3) ? 1 : 0;
+  history.push({ t: now, roll, x: nose.x * W / faceW, y: nose.y * H / faceW, half });
+  while (history.length && now - history[0].t > 6000) history.shift();
+  let impScore = 0;
+  const span = history.length ? (now - history[0].t) / 1000 : 0;
+  if (span >= 3 && history.length > 20) {
+    const std = a => { const mu = a.reduce((s,v)=>s+v,0)/a.length; return Math.sqrt(a.reduce((s,v)=>s+(v-mu)**2,0)/a.length); };
+    const rollStd = std(history.map(h => h.roll));
+    const posStd  = Math.hypot(std(history.map(h => h.x)), std(history.map(h => h.y)));
+    const droop   = history.reduce((s,h) => s + h.half, 0) / history.length;
+    impScore = Math.min(100, (rollStd / 6) * 40 + (posStd / 0.08) * 30 + droop * 30);
+  }
+  $('impVal').textContent = span >= 3 ? Math.round(impScore) + ' / 100' : 'measuring…';
+  const alcoholHigh = mq3 !== null && mq3 >= mqTh;
+  const highImp = impScore >= impTh;
+  if (highImp) { if (impSince === null) impSince = now; } else impSince = null;
+  const impaired = (impSince !== null && (now - impSince) > 3000) || alcoholHigh;
+
+  // ===== Update states / counters =====
+  const next = { DROWSY: drowsy, SMOKING: smoking, DRUNK: impaired };
+  for (const k of Object.keys(next)) if (next[k] && !active[k]) counts[k]++;
+  active = next;
+  refreshState();
+}
+
+function refreshState(forceText, forceSub) {
+  $('alertVal').textContent = `${counts.DROWSY} / ${counts.SMOKING} / ${counts.DRUNK}`;
+  setChip('chipDrowsy', active.DROWSY); setChip('chipSmoke', active.SMOKING); setChip('chipDrunk', active.DRUNK);
+
+  let state = 'OK';
+  if (active.DROWSY) state = 'DROWSY'; else if (active.DRUNK) state = 'DRUNK'; else if (active.SMOKING) state = 'SMOKING';
+  const names = { DROWSY:'DROWSY!', DRUNK:'POSSIBLE IMPAIRMENT!', SMOKING:'SMOKING DETECTED!' };
+  const banners = { DROWSY:'⚠ DROWSINESS DETECTED — WAKE UP', DRUNK:'⚠ POSSIBLE IMPAIRMENT — PULL OVER', SMOKING:'⚠ SMOKING DETECTED' };
+
+  if (forceText) {                        // no face
+    setAlarm(null); state = 'OK';
+    statusEl.className = 'status warn'; statusEl.textContent = forceText; $('substatus').textContent = forceSub || '';
+    stage.className = 'stage warn';
+  } else if (state === 'OK') {
+    statusEl.className = 'status ok'; statusEl.textContent = 'Alert'; $('substatus').textContent = 'Driver looks fine';
+    stage.className = 'stage'; setAlarm(null);
+  } else {
+    statusEl.className = 'status bad'; statusEl.textContent = names[state];
+    $('substatus').textContent = Object.keys(active).filter(k => active[k]).join(' + ');
+    $('banner').textContent = banners[state];
+    stage.className = 'stage bad'; setAlarm(state);
+  }
+  if (state !== currentState) { currentState = state; sendESP(state); }
+}
+
+// ---------- Camera ----------
+$('startBtn').onclick = async () => {
+  try {
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    camera = new Camera(video, { onFrame: async () => { await faceMesh.send({ image: video }); await hands.send({ image: video }); }, width: 640, height: 480 });
+    await camera.start();
+    running = true;
+    $('startBtn').disabled = true; $('stopBtn').disabled = false;
+    $('msg').textContent = 'Running. Tip: use “Calibrate” for best accuracy.';
+    currentState = 'OK'; sendESP('OK'); refreshState();
+  } catch (err) {
+    $('msg').textContent = 'Could not access camera: ' + err.message + ' (open via https:// or http://localhost)';
+  }
+};
+$('stopBtn').onclick = () => {
+  running = false; setAlarm(null);
+  if (camera) camera.stop();
+  if (video.srcObject) video.srcObject.getTracks().forEach(t => t.stop());
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  active = { DROWSY:false, SMOKING:false, DRUNK:false }; history = [];
+  $('startBtn').disabled = false; $('stopBtn').disabled = true;
+  statusEl.className = 'status ok'; statusEl.textContent = 'Idle'; $('substatus').textContent = 'Camera off';
+  stage.className = 'stage'; $('levelBar').style.width = '0%';
+  setChip('chipDrowsy', false); setChip('chipSmoke', false); setChip('chipDrunk', false);
+  currentState = 'IDLE'; sendESP('IDLE');
+};
+espUI();
+</script>
+</body>
+</html>
